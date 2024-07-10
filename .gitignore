@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.csv
+.gpkg
+output/*
+data/*
+*.Rproj
+*.html
+.Rdata
+.httr-oauth
+.DS_Store
+.quarto

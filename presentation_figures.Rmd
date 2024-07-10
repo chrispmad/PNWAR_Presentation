@@ -1,0 +1,381 @@
+---
+title: "Presentation"
+author: "Martina Beck"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(sf)
+library(readxl)
+library(leaflet)
+library(leaflet.extras)
+library(leaflet.extras2)
+library(htmltools)
+# library(patchwork)
+# library(grid)
+# library(gridExtra)
+library(tigris)
+library(ggtext)
+library(canadianmaps)
+library(gtools)
+```
+
+## Zebra Quagga Mussel Spread
+
+```{r get_data}
+zq = list.files(path = 'data',
+           pattern = 'csv$', 
+           full.names = T) |> 
+  lapply(read_csv) |> 
+  dplyr::bind_rows() |> 
+  purrr::set_names(snakecase::to_snake_case)
+
+```
+
+```{r data_spread_chrono}
+# min(zq$year)
+
+# Bin by 5 year chunks
+zq_b = zq |> 
+  dplyr::mutate(halfdec = year - min(year)) |> 
+  dplyr::mutate(halfdec = floor(halfdec / 5)) |> 
+  dplyr::mutate(halfdec = halfdec + 1) |> 
+  dplyr::mutate(year_r = paste0(min(year)+(halfdec-1)*5, "-",min(year)+(halfdec)*5-1)) |> 
+  dplyr::arrange(halfdec) |> 
+  dplyr::mutate(year_r = forcats::as_factor(year_r)) |> 
+  dplyr::mutate(year_r = forcats::fct_inorder(year_r)) |> 
+  dplyr::count(common_name, year_r) |> 
+  dplyr::group_by(year_r) |> 
+  dplyr::mutate(period_total = sum(unique(n))) |> 
+  dplyr::ungroup() |> 
+  dplyr::arrange(year_r) |> 
+  dplyr::mutate(common_name = str_to_title(common_name))
+
+zq_w = pivot_wider(zq_b, 
+                   names_from = common_name, values_from = n)
+
+fig = ggplot(zq_b) + 
+  geom_col(aes(x = year_r, y = n, color = year_r,
+               fill = common_name, group = common_name), 
+           position="stack") +
+  labs(y = 'Number of Zebra / Quagga Mussel Occurrences',
+       x = "5-year Periods",
+       color = "5-year Periods",
+       fill = "Species") + 
+  # geom_text(data = zq_w, aes(x = year_r, y = period_total + max(period_total)*0.025, label = paste0(period_total,"(",`Zebra Mussel`,"+",`Quagga Mussel`,")"))) +
+  scale_fill_brewer(palette = 'Set3') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1.6))
+```
+
+```{r show_barplot}
+fig
+```
+
+```{r make_table}
+tab = zq_w |> 
+  dplyr::select(`Year Range` = year_r,
+                `Quagga Mussel`,
+                `Zebra Mussel`,
+                `Range Total` = period_total) |> 
+  knitr::kable()
+
+# mytheme <- gridExtra::ttheme_default(
+#   core = list(padding = unit(c(2.5, 2.5), "mm")))
+# tab <- tableGrob(tab, theme = mytheme, rows = NULL)
+```
+
+```{r show_table}
+tab
+```
+
+```{r get_map_data}
+canada = PROV |> 
+  sf::st_transform(4269)
+
+if(!file.exists('data/usa.gpkg')){
+  
+  usa = suppressMessages(tigris::states(cb = TRUE))
+  
+  sf::write_sf(usa,'data/usa.gpkg')
+} else {
+  usa = sf::read_sf('data/usa.gpkg')
+}
+
+# Clip away parts of the US that are not continental / far bits of Alaska.
+canada_clipper = sf::st_bbox(canada)
+canada_clipper[1] <- -180
+canada_clipper[2] <- 0
+canada_clipper = sf::st_as_sfc(canada_clipper)
+
+usa_c = sf::st_intersection(
+  usa,#|> sf::st_transform(4326),
+  canada_clipper #|> sf::st_transform(4269)
+)
+
+shapes = usa_c |> 
+  dplyr::select(name = STUSPS) |> 
+  dplyr::mutate(country = 'USA') |> 
+  dplyr::bind_rows(
+    canada |> 
+      dplyr::select(name = PT) |> 
+      dplyr::mutate(country = 'Canada')
+  )
+
+# Count of ZQ infections by species, year, and state/prov/territory.
+zq_count = zq |> 
+  dplyr::mutate(country = ifelse(country == 'United States of America', 'USA', country)) |> 
+  dplyr::rename(name = state) |> 
+  dplyr::count(year, common_name, country, name)
+```
+
+```{r animated_gif}
+if(interactive()){
+  year_step = 2
+  year_start = 1990
+  year_max = max(zq$year)
+  number_frames = 1 + ((year_max - year_start) / year_step)
+  max_mussels = zq_count |> 
+    count(name, wt = n, sort = T) |> 
+    slice(1) |> 
+    pull(n)
+  
+  for(i in 1:(number_frames)){
+    year_upper_limit = year_start + (i-1)*year_step
+    
+    dat_to_join = zq_count |> 
+      dplyr::filter(year <= year_upper_limit) |> 
+      dplyr::count(country, name, wt = n)
+    
+    shapes_this_round = shapes |> 
+      dplyr::left_join(dat_to_join)
+    
+    ggplot() + 
+      geom_sf(data = shapes_this_round, aes(fill = n)) + 
+      scale_fill_viridis_c(limits = c(1,max_mussels)) + 
+      labs(title = paste0("Zebra Quagga Mussel Detections from ",min(zq$year)," to <b>",year_upper_limit,"</b>"),
+           fill = 'Number of<br>Detections',
+           caption = paste0("Plot ",i," of ",number_frames)) + 
+      theme(title = element_markdown())
+    
+    ggsave(filename = paste0('output/animated_ggplot/frame_',i,'.png'),
+           width = 6, height = 6)
+  }
+  
+  # Read in pictures and make gif
+  images_for_gif = list.files('output/animated_ggplot', 
+                              pattern = 'png$',
+                              full.names = T)
+  
+  images_for_gif = mixedsort(images_for_gif)
+  
+  images_for_gif = images_for_gif |> 
+    lapply(magick::image_read)
+  
+  images_for_gif = Reduce(c, images_for_gif)
+  
+  magick::image_write_gif(c(images_for_gif),
+                          path = 'output/animated_ggplot/ZQ_Mussel_Spread.gif',
+                          delay = 1)
+}
+
+# Read in gif
+magick::image_read('output/animated_ggplot/ZQ_Mussel_Spread.gif')
+```
+
+```{r timelapse_leaflet}
+# library(crosstalk)
+# 
+# dat_by_year = purrr::map(1:(number_frames), ~ {
+#   
+#   year_upper_limit = year_start + (.x-1)*year_step
+#   
+#   dat_to_join = zq_count |> 
+#     dplyr::filter(year <= year_upper_limit) |> 
+#     dplyr::count(country, name, wt = n) |> 
+#     dplyr::mutate(year_limit = year_upper_limit)
+#   
+#   # names(dat_to_join)[3] <- paste0("to_",year_upper_limit)
+#   
+#   dat_to_join
+#   # shapes_this_round = shapes |> 
+#   #   dplyr::left_join(dat_to_join)
+# }) |> 
+#   dplyr::bind_rows()
+#   
+# shapes_wgs = shapes |> sf::st_transform(4326)
+# 
+# shapes_w_dat = dplyr::left_join(shapes_wgs, dat_by_year) |> 
+#   dplyr::mutate(key = paste0(name,'-',year_limit))
+# 
+# shapes_ct = crosstalk::SharedData$new(shapes_w_dat, key = 'key')
+# 
+# leaf_pal = colorNumeric(palette = 'viridis', domain = shapes_w_dat$n)
+# 
+# l = leaflet() |> 
+#   addTiles() |> 
+#   addPolygons(
+#     data = shapes_ct,
+#     fillColor = ~leaf_pal(n)
+#   )
+# 
+# bscols(
+#   list(
+#     l,
+#     # crosstalk::filter_slider('slider','Year',
+#     #                          shapes_ct,
+#     #                          'year_limit',
+#     #                          sep = '',
+#     #                          )
+#     crosstalk::filter_select('filter','Year',
+#                              shapes_ct,
+#                              group = 'year_limit')
+#   )
+# )
+
+```
+
+```{r}
+# filter_slider2 = function (id, label, sharedData, column, step = NULL, round = FALSE, 
+#   ticks = TRUE, animate = FALSE, the_animation_options = list(), width = NULL, sep = ",", 
+#   pre = NULL, post = NULL, timeFormat = NULL, timezone = NULL, 
+#   dragRange = TRUE, min = NULL, max = NULL, values = NULL) 
+# {
+#   if (is.character(column)) {
+#     column <- lazyeval::f_new(as.symbol(column))
+#   }
+#   df <- sharedData$data(withKey = TRUE)
+#   col <- lazyeval::f_eval(column, df)
+#   # values <- na.omit(col)
+#   values <- values
+#   if (is.null(min)) 
+#     min <- min(values)
+#   if (is.null(max)) 
+#     max <- max(values)
+#   # value <- range(values)
+#   # value <- rep(values,2)
+#   value = values
+#   ord <- order(col)
+#   options <- list(values = col[ord], keys = df$key_[ord], 
+#     group = sharedData$groupName())
+#   findStepSize <- function(min, max, step) {
+#     if (!is.null(step)) 
+#       return(step)
+#     range <- max - min
+#     if (range < 2 || crosstalk:::hasDecimals(min) || crosstalk:::hasDecimals(max)) {
+#       step <- pretty(c(min, max), n = 100)
+#       step[2] - step[1]
+#     }
+#     else {
+#       1
+#     }
+#   }
+#   if (inherits(min, "Date")) {
+#     if (!inherits(max, "Date") || !inherits(value, "Date")) 
+#       stop("`min`, `max`, and `value must all be Date or non-Date objects")
+#     dataType <- "date"
+#     if (is.null(timeFormat)) 
+#       timeFormat <- "%F"
+#   }
+#   else if (inherits(min, "POSIXt")) {
+#     if (!inherits(max, "POSIXt") || !inherits(value, "POSIXt")) 
+#       stop("`min`, `max`, and `value must all be POSIXt or non-POSIXt objects")
+#     dataType <- "datetime"
+#     if (is.null(timeFormat)) 
+#       timeFormat <- "%F %T"
+#   }
+#   else {
+#     dataType <- "number"
+#   }
+#   if (isTRUE(round)) 
+#     round <- 0
+#   else if (!is.numeric(round)) 
+#     round <- NULL
+#   step <- findStepSize(min, max, step)
+#   step <- signif(step, 14)
+#   if (dataType %in% c("date", "datetime")) {
+#     to_ms <- function(x) 1000 * as.numeric(as.POSIXct(x))
+#     step <- to_ms(max) - to_ms(max - step)
+#     min <- to_ms(min)
+#     max <- to_ms(max)
+#     value <- to_ms(value)
+#   }
+#   range <- max - min
+#   if (ticks) {
+#     n_steps <- range/step
+#     scale_factor <- ceiling(n_steps/10)
+#     n_ticks <- n_steps/scale_factor
+#   }
+#   else {
+#     n_ticks <- NULL
+#   }
+#   sliderProps <- crosstalk:::dropNulls(list(`data-skin` = "shiny", `data-type` = if (length(value) > 
+#     1) "double", 
+#     `data-min` = crosstalk:::formatNoSci(min), 
+#     `data-max` = crosstalk:::formatNoSci(max), 
+#     `data-from` = crosstalk:::formatNoSci(value[1]), `data-to` = if (length(value) > 
+#       1) crosstalk:::formatNoSci(value[2]), `data-step` = crosstalk:::formatNoSci(step), 
+#     `data-grid` = ticks, `data-grid-num` = n_ticks, `data-grid-snap` = FALSE, 
+#     `data-prettify-separator` = sep, `data-prefix` = pre, 
+#     `data-postfix` = post, `data-keyboard` = TRUE, `data-keyboard-step` = step/(max - 
+#       min) * 100, `data-drag-interval` = dragRange, `data-round` = round, 
+#     `data-data-type` = dataType, `data-time-format` = timeFormat, 
+#     `data-timezone` = timezone))
+#   sliderProps <- lapply(sliderProps, function(x) {
+#     if (identical(x, TRUE)) 
+#       "true"
+#     else if (identical(x, FALSE)) 
+#       "false"
+#     else x
+#   })
+#   sliderTag <- div(class = "form-group crosstalk-input", class = "crosstalk-input-slider js-range-slider", 
+#     id = id, style = if (!is.null(width)) 
+#       paste0("width: ", htmltools::validateCssUnit(width), ";"), 
+#     if (!is.null(label)) 
+#       crosstalk:::controlLabel(id, label), do.call(tags$input, sliderProps), 
+#     tags$script(type = "application/json", `data-for` = id, 
+#       jsonlite::toJSON(options, dataframe = "columns", 
+#         pretty = TRUE)))
+#   if (identical(animate, TRUE)) 
+#     # animate <- shiny::animationOptions()
+#     animate <- the_animation_options
+#   if (!is.null(animate) && !identical(animate, FALSE)) {
+#     if (is.null(animate$playButton)) 
+#       animate$playButton <- shiny::icon("play")
+#     if (is.null(animate$pauseButton)) 
+#       animate$pauseButton <- shiny::icon("pause")
+#     sliderTag <- htmltools::tagAppendChild(sliderTag, tags$div(class = "slider-animate-container", 
+#       tags$a(href = "#", class = "slider-animate-button", 
+#         `data-target-id` = id, `data-interval` = animate$interval, 
+#         `data-loop` = animate$loop, span(class = "play", 
+#           animate$playButton), span(class = "pause", 
+#           animate$pauseButton))))
+#   }
+#   htmltools::browsable(attachDependencies(sliderTag, c(crosstalk:::ionRangeSliderLibs(), 
+#     crosstalk:::crosstalkLibs())))
+# }
+```
+
+```{r}
+# bscols(
+#   filter_slider2('slider','Year',
+#                              shapes_ct,
+#                              'year_limit',
+#                              sep = '',
+#                  dragRange = FALSE,
+#                  animate = T,
+#                 the_animation_options = list(interval = 2,
+#                                          loop = TRUE,
+#                                          playButton = NULL,
+#                                          pauseButton = NULL),
+#               
+#                  min = min(shapes_w_dat$year_limit,na.rm=T),
+#                  max = max(shapes_w_dat$year_limit,na.rm=T),
+#                  values = min(shapes_w_dat$year_limit,na.rm=T)
+#                              )
+# )
+```
+
